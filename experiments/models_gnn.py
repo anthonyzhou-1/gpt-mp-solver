@@ -41,16 +41,15 @@ class GNN_Layer(MessagePassing):
         self.in_features = in_features
         self.out_features = out_features
         self.hidden_features = hidden_features
-
         self.message_net_1 = nn.Sequential(nn.Linear(2 * in_features + time_window + 1 + n_variables, hidden_features),
-                                           Swish()
-                                           )
+                                        Swish()
+                                        )
+        self.update_net_1 = nn.Sequential(nn.Linear(in_features + hidden_features + n_variables, hidden_features),
+                                Swish()
+                                )                           
         self.message_net_2 = nn.Sequential(nn.Linear(hidden_features, hidden_features),
                                            Swish()
                                            )
-        self.update_net_1 = nn.Sequential(nn.Linear(in_features + hidden_features + n_variables, hidden_features),
-                                          Swish()
-                                          )
         self.update_net_2 = nn.Sequential(nn.Linear(hidden_features, out_features),
                                           Swish()
                                           )
@@ -93,7 +92,8 @@ class MP_PDE_Solver(torch.nn.Module):
                  time_window: int = 25,
                  hidden_features: int = 128,
                  hidden_layer: int = 6,
-                 eq_variables: dict = {}
+                 eq_variables: dict = {},
+                 use_gpt: bool = True,
     ):
         """
         Initialize MP-PDE solver class.
@@ -116,13 +116,17 @@ class MP_PDE_Solver(torch.nn.Module):
         self.hidden_layer = hidden_layer
         self.time_window = time_window
         self.eq_variables = eq_variables
+        self.use_gpt = use_gpt
+        self.n_variables = len(self.eq_variables) + 1 
+        if(self.use_gpt):
+            self.n_variables = self.n_variables + self.time_window
 
         self.gnn_layers = torch.nn.ModuleList(modules=(GNN_Layer(
             in_features=self.hidden_features,
             hidden_features=self.hidden_features,
             out_features=self.hidden_features,
             time_window=self.time_window,
-            n_variables=len(self.eq_variables) + 1  # variables = eq_variables + time
+            n_variables=self.n_variables,  # variables = eq_variables + time
         ) for _ in range(self.hidden_layer - 1)))
 
         # The last message passing last layer has a fixed output size to make the use of the decoder 1D-CNN easier
@@ -130,17 +134,16 @@ class MP_PDE_Solver(torch.nn.Module):
                                          hidden_features=self.hidden_features,
                                          out_features=self.hidden_features,
                                          time_window=self.time_window,
-                                         n_variables=len(self.eq_variables) + 1
+                                         n_variables=self.n_variables,
                                         )
                                )
 
         self.embedding_mlp = nn.Sequential(
-            nn.Linear(2*self.time_window + 2 + len(self.eq_variables), self.hidden_features),
+            nn.Linear(self.time_window + 1 + self.n_variables, self.hidden_features),
             Swish(),
             nn.Linear(self.hidden_features, self.hidden_features),
             Swish()
         )
-
 
         # Decoder CNN, maps to different outputs (temporal bundling)
         if(self.time_window==20):
@@ -173,7 +176,6 @@ class MP_PDE_Solver(torch.nn.Module):
             torch.Tensor: data output
         """
         u = data.x
-        e = data.e
         # Encode and normalize coordinate information
         pos = data.pos
         pos_x = pos[:, 1][:, None] / self.pde.L
@@ -199,7 +201,10 @@ class MP_PDE_Solver(torch.nn.Module):
             variables = torch.cat((variables, data.c / self.eq_variables["c"]), -1)
 
         # Encoder and processor (message passing)
-        node_input = torch.cat((u, e, pos_x, variables), -1)
+        if(self.use_gpt):
+            e = data.e
+            variables = torch.cat((variables, e), -1)
+        node_input = torch.cat((u, pos_x, variables), -1)
         h = self.embedding_mlp(node_input)
         for i in range(self.hidden_layer):
             h = self.gnn_layers[i](h, u, pos_x, variables, edge_index, batch)

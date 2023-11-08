@@ -177,8 +177,7 @@ class GraphCreator(nn.Module):
                      labels: torch.Tensor,
                      x: torch.Tensor,
                      variables: dict,
-                     steps: list,
-                     embeddings: torch.Tensor) -> Data:
+                     steps: list,) -> Data:
         """
         Getting graph structure out of data sample
         previous timesteps are combined in one node
@@ -195,42 +194,21 @@ class GraphCreator(nn.Module):
         nt = self.pde.grid_size[0]
         nx = self.pde.grid_size[1]
         t = torch.linspace(self.pde.tmin, self.pde.tmax, nt)
+        u, x_pos, t_pos, y, batch = torch.Tensor(), torch.Tensor(), torch.Tensor(), torch.Tensor(), torch.Tensor()
+        for b, (data_batch, labels_batch, step) in enumerate(zip(data, labels, steps)):
+            # data_batch is of shape (time_window, nx)
+            # labels_batch is of shape (time_window, nx)
 
-        if(embeddings is not None):
-            u, e, x_pos, t_pos, y, batch = torch.Tensor(), torch.Tensor(), torch.Tensor(), torch.Tensor(), torch.Tensor(), torch.Tensor()
-            for b, (data_batch, e_batch, labels_batch, step) in enumerate(zip(data, embeddings, labels, steps)):
-                # data_batch is of shape (time_window, nx)
-                # e_batch is of shape (nt, embedding_size)
-                # labels_batch is of shape (time_window, nx)
-
-                e_batch = e_batch[step-self.tw:step].cpu()  # selects relevant embeddings
-
-                # constructs list of shape [time_window, (nx,1)] and concatenates along time axis to make tensor of shape [time_window, nx]
-                # transposes to make tensor of shape [nx, time_window]
-                # concatenates along batch axis to make tensor of shape [batch_size*nx, time_window]
-                u = torch.cat((u, torch.transpose(torch.cat([d[None, :] for d in data_batch]), 0, 1)), )  
-                e = torch.cat((e, torch.transpose(torch.cat([e_b[None, :] for e_b in e_batch]), 0, 1)), )
-                y = torch.cat((y, torch.transpose(torch.cat([l[None, :] for l in labels_batch]), 0, 1)), )
-                x_pos = torch.cat((x_pos, x[0]), )
-                t_pos = torch.cat((t_pos, torch.ones(nx) * t[step]), )
-                batch = torch.cat((batch, torch.ones(nx) * b), )
-        else:
-            u, x_pos, t_pos, y, batch = torch.Tensor(), torch.Tensor(), torch.Tensor(), torch.Tensor(), torch.Tensor()
-            for b, (data_batch, labels_batch, step) in enumerate(zip(data, labels, steps)):
-                # data_batch is of shape (time_window, nx)
-                # labels_batch is of shape (time_window, nx)
-
-                # constructs list of shape [time_window, (nx,1)] and concatenates along time axis to make tensor of shape [time_window, nx]
-                # transposes to make tensor of shape [nx, time_window]
-                # concatenates along batch axis to make tensor of shape [batch_size*nx, time_window]
-                u = torch.cat((u, torch.transpose(torch.cat([d[None, :] for d in data_batch]), 0, 1)), )  
-                y = torch.cat((y, torch.transpose(torch.cat([l[None, :] for l in labels_batch]), 0, 1)), )
-                x_pos = torch.cat((x_pos, x[0]), )
-                t_pos = torch.cat((t_pos, torch.ones(nx) * t[step]), )
-                batch = torch.cat((batch, torch.ones(nx) * b), )
+            # constructs list of shape [time_window, (nx,1)] and concatenates along time axis to make tensor of shape [time_window, nx]
+            # transposes to make tensor of shape [nx, time_window]
+            # concatenates along batch axis to make tensor of shape [batch_size*nx, time_window]
+            u = torch.cat((u, torch.transpose(torch.cat([d[None, :] for d in data_batch]), 0, 1)), )  
+            y = torch.cat((y, torch.transpose(torch.cat([l[None, :] for l in labels_batch]), 0, 1)), )
+            x_pos = torch.cat((x_pos, x[0]), )
+            t_pos = torch.cat((t_pos, torch.ones(nx) * t[step]), )
+            batch = torch.cat((batch, torch.ones(nx) * b), )
 
         # Calculate the edge_index
-
         # Note, investigate knn or constructing edge indices based on adaptive proximity (only need to do once per problem)
 
         if f'{self.pde}' == 'CE':
@@ -241,8 +219,6 @@ class GraphCreator(nn.Module):
             edge_index = knn_graph(x_pos, k=self.n, batch=batch.long(), loop=False) 
 
         graph = Data(x=u, edge_index=edge_index)
-        if(embeddings is not None):
-            graph.e = e
         graph.y = y
         graph.pos = torch.cat((t_pos[:, None], x_pos[:, None]), 1)
         graph.batch = batch.long()
@@ -272,13 +248,32 @@ class GraphCreator(nn.Module):
 
         return graph
 
+    def add_embeddings(self,                             
+                            graph: Data,
+                             embeddings: torch.Tensor,
+                             steps: list) -> Data:
+        """
+        Adds embeddings to current graph
+        Args:
+            graph (Data): Pytorch geometric data object
+            steps (list): list of different starting points for each batch entry
+            embeddings (torch.Tensor): embeddings from GPT model (batch_size, nt, embedding_size)
+        Returns:
+            Data: Pytorch Geometric data graph
+        """
+        e = torch.Tensor()
+        for e_batch, step in zip(embeddings, steps):
+            print(e_batch.shape)
+            e_batch = e_batch[step-self.tw:step].cpu()  # selects relevant embeddings
+            e = torch.cat((e, torch.transpose(torch.cat([e_b[None, :] for e_b in e_batch]), 0, 1)), )
+        graph.e = e
+        return graph
 
     def create_next_graph(self,
                              graph: Data,
                              pred: torch.Tensor,
                              labels: torch.Tensor,
-                             steps: list,
-                             embeddings: torch.Tensor,) -> Data:
+                             steps: list) -> Data:
         """
         Getting new graph for the next timestep
         Method is used for unrolling and when applying the pushforward trick during training
@@ -296,24 +291,11 @@ class GraphCreator(nn.Module):
         nx = self.pde.grid_size[1]
         t = torch.linspace(self.pde.tmin, self.pde.tmax, nt)
         # Update labels and input timesteps
-
-        if(embeddings is not None):
-            y, e, t_pos = torch.Tensor(), torch.Tensor(), torch.Tensor()
-            for (labels_batch, e_batch, step) in zip(labels, embeddings, steps):
-                e_batch = e_batch[step-self.tw:step].cpu()  # selects relevant embeddings
-
-                y = torch.cat((y, torch.transpose(torch.cat([l[None, :] for l in labels_batch]), 0, 1)), )
-                e = torch.cat((e, torch.transpose(torch.cat([e_b[None, :] for e_b in e_batch]), 0, 1)), )
-                t_pos = torch.cat((t_pos, torch.ones(nx) * t[step]), )
-            graph.y = y
-            graph.e = e
-            graph.pos[:, 0] = t_pos
-        else:
-            y, t_pos = torch.Tensor(), torch.Tensor(),
-            for (labels_batch, step) in zip(labels, steps):
-                y = torch.cat((y, torch.transpose(torch.cat([l[None, :] for l in labels_batch]), 0, 1)), )
-                t_pos = torch.cat((t_pos, torch.ones(nx) * t[step]), )
-            graph.y = y
-            graph.pos[:, 0] = t_pos
+        y, t_pos = torch.Tensor(), torch.Tensor(),
+        for (labels_batch, step) in zip(labels, steps):
+            y = torch.cat((y, torch.transpose(torch.cat([l[None, :] for l in labels_batch]), 0, 1)), )
+            t_pos = torch.cat((t_pos, torch.ones(nx) * t[step]), )
+        graph.y = y
+        graph.pos[:, 0] = t_pos
 
         return graph

@@ -6,17 +6,18 @@ from common.utils import HDF5Dataset, GraphCreator
 from equations.PDEs import *
 import wandb
 
-def training_loop(model: torch.nn.Module,
+def training_loop(model_gnn: torch.nn.Module,
                   unrolling: list,
                   batch_size: int,
-                  optimizer: torch.optim,
+                  optimizer_gnn: torch.optim,
                   loader: DataLoader,
                   graph_creator: GraphCreator,
                   criterion: torch.nn.modules.loss,
-                  gpt: torch.nn.Module = None,  
+                  model_gpt: torch.nn.Module = None,  
                   optimizer_gpt: torch.optim = None,
                   scheduler_gpt: torch.optim.lr_scheduler = None,
-                  device: torch.cuda.device="cpu") -> torch.Tensor:
+                  device: torch.cuda.device="cpu",
+                  mode = "GNN") -> torch.Tensor:
     """
     One training epoch with random starting points for every trajectory
     Args:
@@ -35,8 +36,8 @@ def training_loop(model: torch.nn.Module,
 
     losses = []
     for (u_base, u_super, x, variables) in loader:
-        optimizer.zero_grad()
-        if gpt is not None:
+        optimizer_gnn.zero_grad()
+        if model_gpt is not None:
             optimizer_gpt.zero_grad()
         # Randomly choose number of unrollings
         unrolled_graphs = random.choice(unrolling)
@@ -46,16 +47,17 @@ def training_loop(model: torch.nn.Module,
         random_steps = random.choices(steps, k=batch_size)
         data, labels = graph_creator.create_data(u_super, random_steps)
 
-        if gpt is not None:
+        if model_gpt is not None:
             data_gpt = u_super.to(device)
-            embeddings = gpt(data_gpt)
-        else:
-            embeddings = None
+            embeddings = model_gpt(data_gpt)
 
-        if f'{model}' == 'GNN':
-            graph = graph_creator.create_graph(data, labels, x, variables, random_steps, embeddings).to(device)
+        if mode == 'GNN':
+            graph = graph_creator.create_graph(data, labels, x, variables, random_steps).to(device)
         else:
             data, labels = data.to(device), labels.to(device)
+
+        if model_gpt is not None:
+            graph = graph_creator.add_embeddings(graph, embeddings, random_steps).to(device)
 
         # Unrolling of the equation which serves as input at the current step
         # This is the pushforward trick!!!
@@ -63,24 +65,27 @@ def training_loop(model: torch.nn.Module,
             for _ in range(unrolled_graphs):
                 random_steps = [rs + graph_creator.tw for rs in random_steps]
                 _, labels = graph_creator.create_data(u_super, random_steps)
-                if f'{model}' == 'GNN':
-                    pred = model(graph)
+                if mode == 'GNN':
+                    pred = model_gnn(graph)
+                    graph = graph_creator.create_next_graph(graph, pred, labels, random_steps).to(device)
                 else:
-                    data = model(data)
+                    data = model_gnn(data)
                     labels = labels.to(device)
 
-        if f'{model}' == 'GNN':
-            graph = graph_creator.create_next_graph(graph, pred, labels, random_steps, embeddings).to(device)
-            pred = model(graph)
+        if model_gpt is not None:
+            graph = graph_creator.add_embeddings(graph, embeddings, random_steps).to(device)
+    
+        if mode == 'GNN':
+            pred = model_gnn(graph)
             loss = criterion(pred, graph.y)
         else:
-            pred = model(data)
+            pred = model_gnn(data)
             loss = criterion(pred, labels)
 
         loss = torch.sqrt(loss)
         loss.backward()
         losses.append(loss.detach() / batch_size)
-        optimizer.step()
+        optimizer_gnn.step()
 
         grads_gnn = [
             param.grad.detach().flatten()
@@ -92,7 +97,7 @@ def training_loop(model: torch.nn.Module,
             "metrics/gradnorm_gnn": norm_gnn,
         })
 
-        if gpt is not None:
+        if model_gpt is not None:
             optimizer_gpt.step()
             scheduler_gpt.step()
             wandb.log({
@@ -111,14 +116,15 @@ def training_loop(model: torch.nn.Module,
     losses = torch.stack(losses)
     return losses
 
-def test_timestep_losses(model: torch.nn.Module,
+def test_timestep_losses(model_gnn: torch.nn.Module,
                          steps: list,
                          batch_size: int,
                          loader: DataLoader,
                          graph_creator: GraphCreator,
                          criterion: torch.nn.modules.loss,
-                         gpt: torch.nn.Module = None,
-                         device: torch.cuda.device = "cpu") -> None:
+                         model_gpt: torch.nn.Module = None,
+                         device: torch.cuda.device = "cpu",
+                         mode = "GNN") -> None:
     """
     Loss for one neural network forward pass at certain timepoints on the validation/test datasets
     Args:
@@ -132,9 +138,9 @@ def test_timestep_losses(model: torch.nn.Module,
     Returns:
         None
     """
-    model.eval()
-    if gpt is not None:
-        gpt.eval()
+    model_gnn.eval()
+    if model_gpt is not None:
+        model_gpt.eval()
     for step in steps:
 
         if (step != graph_creator.tw and step % graph_creator.tw != 0):
@@ -145,18 +151,18 @@ def test_timestep_losses(model: torch.nn.Module,
             with torch.no_grad():
                 same_steps = [step]*batch_size
                 data, labels = graph_creator.create_data(u_super, same_steps)
-                if gpt is not None:
+                if model_gpt is not None:
                     data_gpt = u_super.to(device)
-                    embeddings = gpt(data_gpt)
-                else:
-                    embeddings = None
-                if f'{model}' == 'GNN':
+                    embeddings = model_gpt(data_gpt)
+                if mode == 'GNN':
                     graph = graph_creator.create_graph(data, labels, x, variables, same_steps, embeddings).to(device)
-                    pred = model(graph)
+                    if(model_gpt is not None):
+                        graph = graph_creator.add_embeddings(graph, embeddings, same_steps).to(device)
+                    pred = model_gnn(graph)
                     loss = criterion(pred, graph.y)
                 else:
                     data, labels = data.to(device), labels.to(device)
-                    pred = model(data)
+                    pred = model_gnn(data)
                     loss = criterion(pred, labels)
                 losses.append(loss / batch_size)
 
@@ -165,7 +171,7 @@ def test_timestep_losses(model: torch.nn.Module,
 
 
 
-def test_unrolled_losses(model: torch.nn.Module,
+def test_unrolled_losses(model_gnn: torch.nn.Module,
                          steps: list,
                          batch_size: int,
                          nr_gt_steps: int,
@@ -173,8 +179,9 @@ def test_unrolled_losses(model: torch.nn.Module,
                          loader: DataLoader,
                          graph_creator: GraphCreator,
                          criterion: torch.nn.modules.loss,
-                         gpt: torch.nn.Module,
-                         device: torch.cuda.device = "cpu") -> torch.Tensor:
+                         model_gpt: torch.nn.Module,
+                         device: torch.cuda.device = "cpu",
+                         mode = "GNN") -> torch.Tensor:
     """
     Loss for full trajectory unrolling, we report this loss in the paper
     Args:
@@ -198,19 +205,19 @@ def test_unrolled_losses(model: torch.nn.Module,
             same_steps = [graph_creator.tw * nr_gt_steps] * batch_size
             data, labels = graph_creator.create_data(u_super, same_steps)
 
-            if gpt is not None:
+            if model_gpt is not None:
                 data_gpt = u_super.to(device)
-                embeddings = gpt(data_gpt)
-            else:
-                embeddings = None
+                embeddings = model_gpt(data_gpt)
 
-            if f'{model}' == 'GNN':
-                graph = graph_creator.create_graph(data, labels, x, variables, same_steps, embeddings).to(device)
-                pred = model(graph)
+            if mode == 'GNN':
+                graph = graph_creator.create_graph(data, labels, x, variables, same_steps).to(device)
+                if(model_gpt is not None):
+                    graph = graph_creator.add_embeddings(graph, embeddings, same_steps).to(device)
+                pred = model_gnn(graph)
                 loss = criterion(pred, graph.y) / nx_base_resolution
             else:
                 data, labels = data.to(device), labels.to(device)
-                pred = model(data)
+                pred = model_gnn(data)
                 loss = criterion(pred, labels) / nx_base_resolution
 
             losses_tmp.append(loss / batch_size)
@@ -219,13 +226,15 @@ def test_unrolled_losses(model: torch.nn.Module,
             for step in range(graph_creator.tw * (nr_gt_steps + 1), graph_creator.t_res - graph_creator.tw + 1, graph_creator.tw):
                 same_steps = [step] * batch_size
                 _, labels = graph_creator.create_data(u_super, same_steps)
-                if f'{model}' == 'GNN':
-                    graph = graph_creator.create_next_graph(graph, pred, labels, same_steps, embeddings).to(device)
-                    pred = model(graph)
+                if mode == 'GNN':
+                    graph = graph_creator.create_next_graph(graph, pred, labels, same_steps).to(device)
+                    if(model_gpt is not None):
+                        graph = graph_creator.add_embeddings(graph, embeddings, same_steps).to(device)
+                    pred = model_gnn(graph)
                     loss = criterion(pred, graph.y) / nx_base_resolution
                 else:
                     labels = labels.to(device)
-                    pred = model(pred)
+                    pred = model_gnn(pred)
                     loss = criterion(pred, labels) / nx_base_resolution
                 losses_tmp.append(loss / batch_size)
 
@@ -247,7 +256,3 @@ def test_unrolled_losses(model: torch.nn.Module,
     print(f'Unrolled forward base losses {torch.mean(losses_base)}')
 
     return losses
-
-
-
-

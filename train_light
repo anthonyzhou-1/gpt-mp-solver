@@ -8,6 +8,7 @@ from experiments.models_gnn import MP_PDE_Solver
 import wandb
 from experiments.train_helper import *
 from datetime import datetime
+import torch_geometric
 
 def train(gnn_config: dict,
           pde: PDE,
@@ -149,10 +150,17 @@ gnn_config = {
         "lr_decay": 0.4,
         "unrolling": 1,
         "device": gpt_config["device"],
+        "compile": False,
 }
 
 device = gpt_config["device"]
 use_gpt = gpt_config["use_gpt"]
+
+config = gpt_config | gnn_config
+
+run = wandb.init(
+    project="gpt-mp-pde-solver",
+    config=config)
 
 ## GNN Initialization
 pde = CE(device=device)
@@ -212,22 +220,16 @@ model_gnn = MP_PDE_Solver(pde=pde,
 model_parameters = filter(lambda p: p.requires_grad, model_gnn.parameters())
 params = sum([np.prod(p.size()) for p in model_parameters])
 print(f'Number of GNN parameters: {params}')
-
-optimizer_gnn = torch.optim.AdamW(model_gnn.parameters(), lr=gnn_config["lr"], fused=True)
-scheduler_gnn = torch.optim.lr_scheduler.MultiStepLR(optimizer_gnn, milestones=[gnn_config["unrolling"], 5, 10, 15], gamma=gnn_config["lr_decay"])
-
 ## GPT Initialization
 
 if(use_gpt):
     model_gpt = GPT(gpt_config)
-    optimizer_gpt = torch.optim.AdamW(model_gpt.parameters(), lr=gpt_config["min_lr"], betas=(gpt_config["beta1"], gpt_config["beta2"]), fused=True)
-    scheduler_gpt = torch.optim.lr_scheduler.OneCycleLR(optimizer_gpt, max_lr=gpt_config["learning_rate"], steps_per_epoch=graph_creator.t_res * len(train_loader), epochs=gpt_config["max_iters"], pct_start=gpt_config["pct_start"], anneal_strategy='cos', final_div_factor=gpt_config["learning_rate"]/gpt_config["min_lr"])
 else:
     model_gpt = None
     optimizer_gpt = None
     scheduler_gpt = None
 
-## Multi-GPU
+## Multi-GPU/Compile
 
 if torch.cuda.device_count() > 1:
   print("Let's use", torch.cuda.device_count(), "GPUs!")
@@ -236,8 +238,19 @@ if torch.cuda.device_count() > 1:
     model_gpt = nn.DataParallel(model_gpt)
 
 model_gnn = model_gnn.to(device)
+optimizer_gnn = torch.optim.AdamW(model_gnn.parameters(), lr=gnn_config["lr"], fused=True)
+scheduler_gnn = torch.optim.lr_scheduler.MultiStepLR(optimizer_gnn, milestones=[gnn_config["unrolling"], 5, 10, 15], gamma=gnn_config["lr_decay"])
+
 if(use_gpt):
     model_gpt = model_gpt.to(device)
+    optimizer_gpt = torch.optim.AdamW(model_gpt.parameters(), lr=gpt_config["min_lr"], betas=(gpt_config["beta1"], gpt_config["beta2"]), fused=True)
+    scheduler_gpt = torch.optim.lr_scheduler.OneCycleLR(optimizer_gpt, max_lr=gpt_config["learning_rate"], steps_per_epoch=graph_creator.t_res * len(train_loader), epochs=gpt_config["max_iters"], pct_start=gpt_config["pct_start"], anneal_strategy='cos', final_div_factor=gpt_config["learning_rate"]/gpt_config["min_lr"])
+
+if(gnn_config["compile"]):
+    print("Compiling Models...")
+    model_gnn = torch_geometric.compile(model_gnn, dynamic=True, fullgraph=True)
+    if(use_gpt):
+        model_gpt = torch.compile(model_gpt)
 
 ## Training
 min_val_loss = 10e10

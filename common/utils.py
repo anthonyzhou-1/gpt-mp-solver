@@ -263,7 +263,6 @@ class GraphCreator(nn.Module):
         """
         e = torch.Tensor()
         for e_batch, step in zip(embeddings, steps):
-            print(e_batch.shape)
             e_batch = e_batch[step-self.tw:step].cpu()  # selects relevant embeddings
             e = torch.cat((e, torch.transpose(torch.cat([e_b[None, :] for e_b in e_batch]), 0, 1)), )
         graph.e = e

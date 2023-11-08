@@ -51,11 +51,12 @@ def train(gnn_config: dict,
     # Since the starting point is randomly drawn, this in expectation has every possible starting point/sample combination of the training data.
     # Therefore in expectation the whole available training information is covered.
     for i in range(graph_creator.t_res):
-        losses = training_loop(model_gnn, unrolling, gnn_config["batch_size"], optimizer_gnn, loader, graph_creator, criterion, model_gpt, optimizer_gpt, scheduler_gpt, device)
+        losses, norms_gnn, norms_gpt, lr_gpt = training_loop(model_gnn, unrolling, gnn_config["batch_size"], optimizer_gnn, loader, graph_creator, criterion, model_gpt, optimizer_gpt, scheduler_gpt, device)
         print(f'Training Loss (progress: {i / graph_creator.t_res:.2f}): {torch.mean(losses)}')
-        wandb.log({
-        "train/loss": torch.mean(losses),
-        })
+        wandb.log({"train/loss": torch.mean(losses),
+                    "metrics/grad_gnn_norm": torch.mean(norms_gnn),
+                    "metrics/grad_gpt_norm": torch.mean(norms_gpt),
+                    "metrics/lr_gpt": lr_gpt,})
 
 def test(gnn_config: dict,
          pde: PDE,
@@ -88,17 +89,17 @@ def test(gnn_config: dict,
 
    # first we check the losses for different timesteps (one forward prediction array!)
     steps = [t for t in range(graph_creator.tw, graph_creator.t_res-graph_creator.tw + 1)]
-    losses = test_timestep_losses(model=model_gnn,
+    losses = test_timestep_losses(model_gnn=model_gnn,
                                   steps=steps,
                                   batch_size=gnn_config["batch_size"],
                                   loader=loader,
                                   graph_creator=graph_creator,
                                   criterion=criterion,
-                                  gpt=model_gpt,
+                                  model_gpt=model_gpt,
                                   device=device)
 
     # next we test the unrolled losses
-    losses = test_unrolled_losses(model=model_gnn,
+    losses = test_unrolled_losses(model_gnn=model_gnn,
                                   steps=steps,
                                   batch_size=gnn_config["batch_size"],
                                   nr_gt_steps=2,
@@ -106,7 +107,7 @@ def test(gnn_config: dict,
                                   loader=loader,
                                   graph_creator=graph_creator,
                                   criterion=criterion,
-                                  gpt= model_gpt,
+                                  model_gpt= model_gpt,
                                   device=device)
 
     return torch.mean(losses)
@@ -147,7 +148,7 @@ gnn_config = {
         "neighbors": 3,
         "time_window": 25,
         "lr": 1e-4,
-        "lr_decay": 0.4,
+        "lr_decay": 0.6,
         "unrolling": 1,
         "device": gpt_config["device"],
         "compile": False,

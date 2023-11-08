@@ -35,6 +35,8 @@ def training_loop(model_gnn: torch.nn.Module,
     """
 
     losses = []
+    gnn_norms = []
+    gpt_norms = []
     for (u_base, u_super, x, variables) in loader:
         optimizer_gnn.zero_grad()
         if model_gpt is not None:
@@ -93,28 +95,23 @@ def training_loop(model_gnn: torch.nn.Module,
             if param.grad is not None
         ]
         norm_gnn = torch.cat(grads_gnn).norm()
-        wandb.log({
-            "metrics/gradnorm_gnn": norm_gnn,
-        })
+        gnn_norms.append(norm_gnn / batch_size)
 
         if model_gpt is not None:
             optimizer_gpt.step()
             scheduler_gpt.step()
-            wandb.log({
-                "metrics/lr_gpt": scheduler_gpt.get_last_lr(),
-            })
             grads_gpt = [
                 param.grad.detach().flatten()
                 for param in model_gpt.parameters()
                 if param.grad is not None
             ]
             norm_gpt = torch.cat(grads_gpt).norm()
-            wandb.log({
-                "metrics/gradnorm_gpt": norm_gpt,
-            })
+            gpt_norms.append(norm_gpt / batch_size)
 
     losses = torch.stack(losses)
-    return losses
+    gnn_norms = torch.stack(gnn_norms)
+    gpt_norms = torch.stack(gpt_norms)
+    return losses, gnn_norms, gpt_norms, scheduler_gpt.get_last_lr()[0]
 
 def test_timestep_losses(model_gnn: torch.nn.Module,
                          steps: list,

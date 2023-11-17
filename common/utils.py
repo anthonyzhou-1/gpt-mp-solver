@@ -10,6 +10,9 @@ from typing import Tuple
 from torch_geometric.data import Data
 from torch_cluster import radius_graph, knn_graph
 from equations.PDEs import *
+from collections import OrderedDict
+import re 
+import matplotlib.pyplot as plt
 
 
 class HDF5Dataset(Dataset):
@@ -298,3 +301,137 @@ class GraphCreator(nn.Module):
         graph.pos[:, 0] = t_pos
 
         return graph
+class Curriculum:
+    '''
+    Class to get probability of using autoregressive input vs. teacher forcing
+    '''
+
+    def __init__(self, total_epochs, delta):
+        self.total_epochs = total_epochs
+        self.delta = delta
+
+        epoch = torch.arange(total_epochs)
+        alpha = (epoch/total_epochs - 0.5)/delta
+
+        k = total_epochs/2 * torch.tanh(alpha)
+        k = k - torch.min(k)
+        k = k/torch.max(k)
+
+        self.probs = k
+
+    def get_prob(self, epoch):
+        return self.probs[epoch]
+
+def process_dict(state_dict: OrderedDict) -> OrderedDict:
+    '''
+    Processes state dict to remove the 'module.' prefix'''
+
+    model_dict = OrderedDict()
+    pattern = re.compile('module.')
+    for k,v in state_dict.items():
+        if re.search("module", k):
+            model_dict[re.sub(pattern, '', k)] = v
+        else:
+            model_dict = state_dict
+    
+    return model_dict
+
+def plot_traj(traj, title):
+    '''
+    Plots PDE trajectory, with lighter colors for later time steps
+    Traj is expected in shape: [nt, nx]
+    '''
+    N = traj.shape[0]
+    plt.rcParams["axes.prop_cycle"] = plt.cycler("color", plt.cm.viridis(np.linspace(0,1,N)))
+
+    fig, ax = plt.subplots()
+    x = torch.linspace(0, 2, traj.shape[1])
+    for i in range(N):
+        ax.plot(x, traj[i])
+    plt.title(title)
+    plt.show()
+
+
+def unroll_traj(u_super, x, variables, model_gnn, model_gpt, graph_creator, batch_size, device, nr_gt_steps = 1):
+    '''
+    Unrolls a trajectory given by u_super, x, and variables
+    u_super is expected in [1, t_res, nx]
+    '''
+
+    with torch.no_grad():
+        same_steps = [graph_creator.tw*nr_gt_steps] * batch_size
+        data, labels = graph_creator.create_data(u_super, same_steps)
+        nx_base_resolution = u_super.shape[2]
+        
+        if(model_gpt is not None):
+            data_gpt = torch.zeros_like(u_super).to(device)
+            data_gpt[:,:same_steps[0],:] = u_super[:,:same_steps[0],:]
+            embeddings = model_gpt(data_gpt)
+
+        graph = graph_creator.create_graph(data, labels, x, variables, same_steps).to(device)
+        if(model_gpt is not None):
+            graph = graph_creator.add_embeddings(graph, embeddings, same_steps).to(device)
+        traj = graph.x
+        pred = model_gnn(graph)
+        traj = torch.cat((traj, pred), dim=1)
+
+        # Unroll trajectory and add losses which are obtained for each unrolling
+        for step in range(graph_creator.tw * (nr_gt_steps + 1), graph_creator.t_res - graph_creator.tw + 1, graph_creator.tw):
+            same_steps = [step] * batch_size
+            _, labels = graph_creator.create_data(u_super, same_steps)
+            graph = graph_creator.create_next_graph(graph, pred, labels, same_steps).to(device)
+            if model_gpt is not None:
+                data_gpt[:, step-graph_creator.tw:step, :] = graph2tensor(graph.x, batch_size, nx_base_resolution)
+                embeddings = model_gpt(data_gpt)
+                graph = graph_creator.add_embeddings(graph, embeddings, same_steps).to(device)
+            pred = model_gnn(graph)
+            traj = torch.cat((traj, pred), dim=1)
+
+    traj = torch.transpose(traj, 0,1)
+    traj_true = u_super
+
+    return traj, traj_true
+
+def graph2tensor(input, batch_size, nx_base_resolution):
+    '''
+    Converts representation of graph from [batch_size*nx, time_window] to [batch_size, time_window, nx]
+    '''
+
+    output = torch.zeros((batch_size, input.shape[1], nx_base_resolution)).to(input.device)
+    batch = 0
+    for i in range(0, input.shape[0], nx_base_resolution):
+        output[batch, :, :] = torch.transpose(input[i:i+nx_base_resolution, :], 0,1)
+        batch += 1
+    return output
+
+def generate_gpt_data(u_super, cache, steps, curriculum_prob, tw):
+    '''
+    Generates data for GPT model
+    data is expected in shape [batch_size, t_res, nx]
+    '''
+    data_gpt = torch.zeros_like(u_super)
+
+    # Context length subtracts the initial sequence given
+    context_len = steps[0] - tw
+
+    # k is the number of autoregressively generated timesteps to add
+    k = torch.floor(curriculum_prob * context_len)
+    
+    # Seed data_gpt with the initial sequence
+    data_gpt[:, :steps[0], :] = u_super[:, :steps[0], :]
+
+    # Mix context in data_gpt with autoregressively generated data according to curriculum
+    start = int(steps[0] - k)
+    data_gpt[:, start:steps[0], :] = cache[:, start:steps[0], :]
+
+    return data_gpt
+
+def update_gpt_data(data_gpt, update_data, steps, tw):
+    '''
+    Appends new data to data_gpt
+    update_data is a model output in shape [batch_size, time_window, nx]
+    data_gpt is expected in shape [batch_size, t_res, nx]
+    '''
+    for i in range(len(steps)):
+        data_gpt[i, steps[i]-tw:steps[i], :] = update_data[i]
+    return data_gpt

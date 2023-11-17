@@ -26,7 +26,7 @@ def check_files(pde: dict, modes: dict, experiment: str) -> None:
             None
     """
     for mode, replace, num_samples in modes:
-        save_name = "data/" + "_".join([str(pde[list(pde.keys())[0]]), mode]) + "_" + experiment
+        save_name = "data/" "large" + "_".join([str(pde[list(pde.keys())[0]]), mode]) + "_" + experiment
         if (replace == True):
             if os.path.exists(f'{save_name}.h5'):
                 os.remove(f'{save_name}.h5')
@@ -144,7 +144,7 @@ def generate_data_wave_equation(experiment: str,
 
     sys.stdout.flush()
 
-    save_name = "data/" + "_".join([str(pde[list(pde.keys())[0]]), mode]) + "_" + experiment
+    save_name = "data/" + "large" + "_".join([str(pde[list(pde.keys())[0]]), mode]) + "_" + experiment
     h5f = h5py.File("".join([save_name, '.h5']), 'a')
     dataset = h5f.create_group(mode)
 
@@ -284,7 +284,7 @@ def generate_data_combined_equation(experiment: str,
     print(f'Batch size: {batch_size}')
     print(f'Number of batches: {num_batches}')
 
-    save_name = "data/" + "_".join([str(pde[list(pde.keys())[0]]), mode]) + "_" + experiment
+    save_name = "data/" + "large" + "_".join([str(pde[list(pde.keys())[0]]), mode]) + "_" + experiment
     h5f = h5py.File("".join([save_name, '.h5']), 'a')
     dataset = h5f.create_group(mode)
 
@@ -413,7 +413,7 @@ def combined_equation(experiment: str,
     dateTimeObj = datetime.now()
     timestring = f'{dateTimeObj.date().month}{dateTimeObj.date().day}{dateTimeObj.time().hour}{dateTimeObj.time().minute}'
     if args.log:
-        logfile = f'data/log/CE_{experiment}_time{timestring}.csv'
+        logfile = f'data/log/largeCE_{experiment}_time{timestring}.csv'
         print(f'Writing to log file {logfile}')
         sys.stdout = open(logfile, 'w')
 

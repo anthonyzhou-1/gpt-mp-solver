@@ -371,7 +371,8 @@ def unroll_traj(u_super, x, variables, model_gnn, model_gpt, graph_creator, batc
         graph = graph_creator.create_graph(data, labels, x, variables, same_steps).to(device)
         if(model_gpt is not None):
             graph = graph_creator.add_embeddings(graph, embeddings, same_steps).to(device)
-        traj = graph.x
+        
+        traj = torch.transpose(u_super[:, :same_steps[0], :].squeeze(), 0, 1).to(device)
         pred = model_gnn(graph)
         traj = torch.cat((traj, pred), dim=1)
 

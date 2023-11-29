@@ -5,6 +5,8 @@ from torch.utils.data import Dataset
 from torch.nn import functional as F
 from typing import Tuple
 from equations.PDEs import *
+from collections import OrderedDict
+import re 
 
 
 class HDF5Dataset(Dataset):
@@ -114,3 +116,17 @@ class HDF5Dataset(Dataset):
 
         else:
             raise Exception("Wrong experiment")
+
+def process_dict(state_dict: OrderedDict) -> OrderedDict:
+    '''
+    Processes state dict to remove the 'module.' prefix'''
+
+    model_dict = OrderedDict()
+    pattern = re.compile('module.')
+    for k,v in state_dict.items():
+        if re.search("module", k):
+            model_dict[re.sub(pattern, '', k)] = v
+        else:
+            model_dict = state_dict
+    
+    return model_dict
